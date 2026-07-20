@@ -1,0 +1,146 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-sign-notarize-release:
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAG="$GITHUB_REF_NAME"
+          else
+            VERSION="$INPUT_VERSION"
+            TAG="v$INPUT_VERSION"
+          fi
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Require Apple release credentials
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in \
+            APPLE_CERTIFICATE_P12_BASE64 \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_KEYCHAIN_PASSWORD \
+            APPLE_ID \
+            APPLE_APP_PASSWORD \
+            APPLE_TEAM_ID; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing required GitHub secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/ntfsmount-signing.keychain-db"
+          printf '%s' "$P12_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          SIGN_IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          if [[ -z "$SIGN_IDENTITY" ]]; then
+            echo "Developer ID Application identity was not found" >&2
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$SIGN_IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Run validation checks
+        run: swift run NTFSMountValidation
+
+      - name: Build and sign universal app
+        env:
+          UNIVERSAL: 1
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: Scripts/build-app.sh
+
+      - name: Verify Developer ID signatures
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/NTFSMount.app
+          codesign -dv --verbose=2 dist/NTFSMount.app 2>&1 | grep 'Authority=Developer ID Application'
+          codesign -dv --verbose=2 dist/NTFSMount.app/Contents/Library/LaunchServices/com.gjy.NTFSMount.Helper 2>&1 | grep 'Authority=Developer ID Application'
+
+      - name: Submit for Apple notarization
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          ditto -c -k --keepParent dist/NTFSMount.app "$RUNNER_TEMP/NTFSMount-notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/NTFSMount-notarize.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple dist/NTFSMount.app
+          xcrun stapler validate dist/NTFSMount.app
+          spctl --assess --type execute --verbose=2 dist/NTFSMount.app
+
+      - name: Create release files
+        id: files
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ZIP="dist/NTFSMount-$VERSION-universal.zip"
+          ditto -c -k --keepParent dist/NTFSMount.app "$ZIP"
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "checksum=$ZIP.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ZIP: ${{ steps.files.outputs.zip }}
+          CHECKSUM: ${{ steps.files.outputs.checksum }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$CHECKSUM" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$ZIP" "$CHECKSUM" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "NTFSMount $TAG" \
+              --generate-notes
+          fi

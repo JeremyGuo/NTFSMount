@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>DriverVersion</key>
+    <string>2026.7.7</string>
+    <key>Architecture</key>
+    <string>arm64</string>
+    <key>Files</key>
+    <dict>
+        <key>ntfs-3g</key>
+        <string>eafdf0e8165cf30b91a0b623b5f789acf56b3a92b78cf8b72d216726fd087e01</string>
+        <key>ntfs-3g.probe</key>
+        <string>961817f7665ced38a19171090940d044ec98b61c62c9d0bd1c306dc09fbbb231</string>
+        <key>libntfs-3g.90.dylib</key>
+        <string>988c3a31d75777ca76c7e62cf2e501c172801b81437e9fc52d6dc5343ccc7432</string>
+        <key>libintl.8.dylib</key>
+        <string>0c6d618e75fea85cc3d631e164a71766fba9341d19ce1f723300c52e63037c51</string>
+        <key>libfuse.2.dylib</key>
+        <string>1aa7efa1c13265baead0d7e83591742af0bccf210fa0a6de364e28163a0dba15</string>
+    </dict>
+</dict>
+</plist>

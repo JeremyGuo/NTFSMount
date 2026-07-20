@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-validate:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run input validation checks
+        run: swift run NTFSMountValidation
+
+      - name: Build release app
+        env:
+          VERSION: 0.0.0-ci
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: Scripts/build-app.sh
+
+      - name: Validate bundle and signature
+        run: |
+          plutil -lint Resources/Info.plist Resources/DriverAllowlist.plist Resources/com.gjy.NTFSMount.Helper.plist
+          test -x dist/NTFSMount.app/Contents/MacOS/NTFSMount
+          test -x dist/NTFSMount.app/Contents/Library/LaunchServices/com.gjy.NTFSMount.Helper
+          codesign --verify --deep --strict --verbose=2 dist/NTFSMount.app
+
+      - name: Smoke-test menu bar process
+        run: |
+          NTFSMOUNT_DISABLE_AUTOMOUNT=1 dist/NTFSMount.app/Contents/MacOS/NTFSMount >app.log 2>&1 &
+          APP_PID=$!
+          sleep 3
+          kill -0 "$APP_PID"
+          kill "$APP_PID"
+          wait "$APP_PID" || true
+          test ! -s app.log
+
+      - name: Package CI artifact
+        run: ditto -c -k --keepParent dist/NTFSMount.app dist/NTFSMount-ci.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NTFSMount-${{ runner.arch }}
+          path: dist/NTFSMount-ci.zip
+          if-no-files-found: error
+          retention-days: 14
