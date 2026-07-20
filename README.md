@@ -2,7 +2,9 @@
 
 一款简洁的 macOS 菜单栏应用：检测外置 NTFS 磁盘，通过 NTFS-3G 自动挂载为可读写，在 Finder“位置”中访问，并支持安全弹出。
 
-![NTFSMount 图标](Resources/AppIcon.png)
+<p align="center">
+  <img src="Resources/AppIcon.png" alt="NTFSMount 图标" width="160">
+</p>
 
 ## 功能
 
@@ -95,11 +97,11 @@ Scripts/create-icns.sh
 - 启动菜单栏进程做冒烟测试
 - 上传临时测试包
 
-推送语义化版本标签（例如 `v0.1.0`）会触发 `.github/workflows/release.yml`：
+推送语义化版本标签（例如 `v0.1.0`）会自动触发 `.github/workflows/release.yml`：
 
 - 构建 arm64 + x86_64 Universal Binary
-- 使用 Developer ID Application 证书签名主应用与后台助手
-- 提交 Apple 公证并 stapling
+- 配置 Apple Secrets 时，使用 Developer ID Application 签名、Apple 公证并 stapling
+- 未配置 Apple Secrets 时，仍发布明确标注为 unsigned 的预发布测试包
 - 生成 zip 和 SHA-256 校验文件
 - 创建 GitHub Release 并上传产物
 

@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-sign-notarize-release:
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 45
 
     steps:
@@ -42,7 +42,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Require Apple release credentials
+      - name: Select signing mode
+        id: signing
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -51,6 +52,7 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          ENABLED=true
           for name in \
             APPLE_CERTIFICATE_P12_BASE64 \
             APPLE_CERTIFICATE_PASSWORD \
@@ -59,12 +61,18 @@ jobs:
             APPLE_APP_PASSWORD \
             APPLE_TEAM_ID; do
             if [[ -z "${!name}" ]]; then
-              echo "Missing required GitHub secret: $name" >&2
-              exit 1
+              ENABLED=false
             fi
           done
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+          if [[ "$ENABLED" == "true" ]]; then
+            echo "Apple credentials found; publishing a signed and notarized release."
+          else
+            echo "::warning::Apple credentials are incomplete; publishing an unsigned prerelease."
+          fi
 
       - name: Import Developer ID certificate
+        if: steps.signing.outputs.enabled == 'true'
         env:
           P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -96,13 +104,18 @@ jobs:
           BUILD_NUMBER: ${{ github.run_number }}
         run: Scripts/build-app.sh
 
-      - name: Verify Developer ID signatures
+      - name: Verify app signature
         run: |
           codesign --verify --deep --strict --verbose=2 dist/NTFSMount.app
+
+      - name: Verify Developer ID signatures
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
           codesign -dv --verbose=2 dist/NTFSMount.app 2>&1 | grep 'Authority=Developer ID Application'
           codesign -dv --verbose=2 dist/NTFSMount.app/Contents/Library/LaunchServices/com.gjy.NTFSMount.Helper 2>&1 | grep 'Authority=Developer ID Application'
 
       - name: Submit for Apple notarization
+        if: steps.signing.outputs.enabled == 'true'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
@@ -122,8 +135,13 @@ jobs:
         id: files
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          SIGNED: ${{ steps.signing.outputs.enabled }}
         run: |
-          ZIP="dist/NTFSMount-$VERSION-universal.zip"
+          if [[ "$SIGNED" == "true" ]]; then
+            ZIP="dist/NTFSMount-$VERSION-universal.zip"
+          else
+            ZIP="dist/NTFSMount-$VERSION-universal-unsigned.zip"
+          fi
           ditto -c -k --keepParent dist/NTFSMount.app "$ZIP"
           shasum -a 256 "$ZIP" > "$ZIP.sha256"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
@@ -135,12 +153,21 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           ZIP: ${{ steps.files.outputs.zip }}
           CHECKSUM: ${{ steps.files.outputs.checksum }}
+          SIGNED: ${{ steps.signing.outputs.enabled }}
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ZIP" "$CHECKSUM" --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" "$ZIP" "$CHECKSUM" \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "NTFSMount $TAG" \
-              --generate-notes
+            if [[ "$SIGNED" == "true" ]]; then
+              gh release create "$TAG" "$ZIP" "$CHECKSUM" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "NTFSMount $TAG" \
+                --generate-notes
+            else
+              gh release create "$TAG" "$ZIP" "$CHECKSUM" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "NTFSMount $TAG (Unsigned)" \
+                --prerelease \
+                --notes "Unsigned automated build for testing. macOS will require confirmation before opening, and the privileged background helper is disabled. Configure the Apple signing Secrets documented in README for signed and notarized releases."
+            fi
           fi
